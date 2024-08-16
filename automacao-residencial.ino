@@ -4,7 +4,7 @@
 #include <ESP8266HTTPClient.h>
 #include <WiFiClient.h>
 
-const char* ssid = "homenet";
+const char* ssid = "homefi-IoT";
 const char* password = "244466666";
 
 LiquidCrystal_I2C lcd(0x27, 20, 4); // Endereço I2C, colunas, linhas
@@ -28,6 +28,14 @@ bool impressao;
 bool estadoDaBomba;
 int nivelCaixa;
 int nivelSisterna;
+const int PinReleBomba = D0;
+const int PinBotao = D7;
+
+// Função de interrupção para alternar o estado da bomba
+void IRAM_ATTR handleButtonPress() {
+  estadoDaBomba = !estadoDaBomba; // Alterna o estado da bomba
+  digitalWrite(PinReleBomba, estadoDaBomba ? LOW : HIGH); // Liga/desliga imediatamente
+}
 
 void limparPosicionarLinha(int linha)
 {
@@ -135,29 +143,39 @@ void imprimeOnOff(int linha, String texto, bool on)
 
 bool ligarBomba(int nivCaixa, int nivSisterna, bool bombaLigada)
 {
+  bool toReturn = bombaLigada; // Assume o estado atual como padrão
+
   Serial.println("----------------");
   Serial.print("Nivel Caixa: ");
   Serial.println(nivCaixa);
   Serial.print("Nivel Sisterna: ");
   Serial.println(nivSisterna);
-  Serial.print("Bomba ligada: ");
+  Serial.print("Bomba estava ligada: ");
   Serial.println(bombaLigada);
 
   if (bombaLigada) {
-    if (nivCaixa == 6) {
-      return false;
+    if (nivCaixa >= 6 || nivSisterna <= 0) {
+      toReturn = false; 
     }
-    if (nivSisterna == 0) {
-      return false;
-    }
-    return true;
   } else {
     if (nivCaixa <= 2 && nivSisterna >= 1) {
-      return true;
-    } else {
-      return false;
+      toReturn = true;
     }
   }
+
+  Serial.print("Bomba liga/desliga: ");
+  Serial.println(toReturn);
+  Serial.println("----------------");
+
+  if (toReturn) {
+    digitalWrite(PinReleBomba, LOW);  // Liga o relé
+    Serial.println("Liga bomba");
+  } else {
+    digitalWrite(PinReleBomba, HIGH); // Desliga o relé
+    Serial.println("Desliga bomba");
+  }
+
+  return toReturn;
 }
 
 void scrollText(String text, int row)
@@ -178,44 +196,72 @@ void scrollText(String text, int row)
 }
 
 void setup() {
+  pinMode(PinReleBomba, OUTPUT);
+  digitalWrite(PinReleBomba, HIGH); // Desliga o relé inicialmente
 
-  Serial.begin(115200); // Inicia a comunicação serial
+  pinMode(PinBotao, INPUT_PULLUP); // Configura o pino do botão com pull-up interno
+
+  // Configura a interrupção no pino do botão, acionada na borda de descida (pressionado)
+  attachInterrupt(digitalPinToInterrupt(PinBotao), handleButtonPress, FALLING);
+
+  Serial.begin(115200);
   while (!Serial) {
-    ; // Espera até que a porta serial esteja pronta, necessário em alguns boards como o Leonardo
+    ;
   }
   lcd.begin();
   lcd.clear();
   lcd.backlight();
 
-  // Exibe a mensagem de conexão no LCD
   lcd.setCursor(0, 0);
-  lcd.print("Conectando WiFi");
+  lcd.print(ssid);
 
-  // Inicia a conexão Wi-Fi
   WiFi.begin(ssid, password);
 
   int retry_count = 0;
   while (WiFi.status() != WL_CONNECTED) {
     delay(1000);
-    Serial.print(".");
+
+    Serial.print("Tentativa ");
+    Serial.print(retry_count);
+    Serial.print(": Status da conexao: ");
+    Serial.println(WiFi.status());
     
-    // Exibe "..." no LCD enquanto tenta conectar
     lcd.setCursor(0, 1);
-    lcd.print("Tentando ");
-    for (int i = 0; i <= retry_count % 3; i++) {
-      lcd.print(".");
+    lcd.print("Conectando ");
+    
+    int numDots = retry_count % 4;
+    switch (numDots) {
+      case 0:
+        lcd.print("   ");
+        break;
+      case 1:
+        lcd.print(".  ");
+        break;
+      case 2:
+        lcd.print(".. ");
+        break;
+      case 3:
+        lcd.print("...");
+        break;
     }
+    
     retry_count++;
+
+    if (retry_count > 30) {
+      Serial.println("Falha ao conectar. Reiniciando o módulo Wi-Fi...");
+      WiFi.disconnect();
+      WiFi.begin(ssid, password);
+      retry_count = 0;
+    }
   }
 
-  // Limpa a linha e exibe uma mensagem de sucesso
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("WiFi Conectado!");
   
   lcd.setCursor(0, 1);
   String ip = "IP: " + WiFi.localIP().toString();
-  scrollText(ip, 1); // Faz scroll na linha 1 (segunda linha) com o IP
+  scrollText(ip, 1);
 
   Serial.println("");
   Serial.println("WiFi Conectado!");
@@ -231,7 +277,7 @@ void setup() {
 }
 
 void loop() {
-  int numero = random(0, 6);
+  int numero = random(0, 7); // Ajustado para incluir o nível 6
   String texto;
 
   if (impressao) {
@@ -245,7 +291,9 @@ void loop() {
   imprimeNivel(0, texto.c_str(), numero);
   impressao = !impressao;
 
+  // Verifica os níveis e ajusta o estado da bomba se necessário
   estadoDaBomba = ligarBomba(nivelCaixa, nivelSisterna, estadoDaBomba);
+  digitalWrite(PinReleBomba, estadoDaBomba ? LOW : HIGH); // Liga/desliga imediatamente
   imprimeOnOff(1, "Bomba", estadoDaBomba);
 
   delay(5000);
